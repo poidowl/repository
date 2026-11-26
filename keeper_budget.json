@@ -1,0 +1,20 @@
+{
+  "ceilings": {
+    "duplicate_exact_groups": 0,
+    "duplicate_name_groups": 0,
+    "hidden_import_count": 0,
+    "large_files_count": 0,
+    "large_funcs_count": 0,
+    "max_file_lines": 882,
+    "scc_count": 0,
+    "scc_max_size": 0,
+    "scc_node_count": 0,
+    "sys_path_files": 0
+  },
+  "options": {
+    "large_file_lines": 1000,
+    "large_func_lines": 150
+  },
+  "repo_name": "repository",
+  "schema": "keeper.budget.v1"
+}
