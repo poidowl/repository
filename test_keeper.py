@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -104,6 +105,28 @@ class KeeperTests(unittest.TestCase):
             data = json.loads(bfile.read_text(encoding="utf-8"))
             self.assertEqual(data["ceilings"]["scc_count"], 0)
 
+    def test_structure_metrics_and_unicode_git_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)
+            self._write(repo, "docs/neon/chara.mjs", "export const c = 1;\n")
+            self._write(repo, "station/patch_1028.py", "x = 1\n")
+            self._write(repo, "station/robot_v2.html", "<script>var a=1;</script>\n")
+            self._write(repo, "station/sode_tameshi.html", "<script>var b=2;</script>\n")
+            self._write(repo, "station/台本システム.py", "y = 2\n")
+            for i in range(6):
+                self._write(repo, f"station/note_{i}.md", "# memo\n")
+            subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+
+            res = keeper.analyze_repo(repo, sprawl_dir_files=8)
+            m = res["metrics"]
+            self.assertEqual(m["code_files"], 5)
+            self.assertEqual(m["code_in_docs_files"], 1)
+            self.assertEqual(m["stamped_code_files"], 3)
+            self.assertEqual(m["sprawl_dirs_count"], 1)
+            self.assertEqual(m["max_code_dir_files"], 10)
+            self.assertEqual(res["sprawl_dirs"][0]["dir"], "station")
+
     def test_self_budget_passes(self) -> None:
         budget_file = REPO_ROOT / "keeper_budget.json"
         self.assertTrue(budget_file.exists(), "keeper_budget.json must exist in repository root")
@@ -115,6 +138,9 @@ class KeeperTests(unittest.TestCase):
             "sys_path_files",
             "duplicate_exact_groups",
             "duplicate_name_groups",
+            "code_in_docs_files",
+            "sprawl_dirs_count",
+            "stamped_code_files",
             "large_files_count",
             "large_funcs_count",
         ):
