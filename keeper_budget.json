@@ -1,19 +1,23 @@
 {
   "ceilings": {
+    "code_in_docs_files": 0,
     "duplicate_exact_groups": 0,
     "duplicate_name_groups": 0,
     "hidden_import_count": 0,
     "large_files_count": 0,
     "large_funcs_count": 0,
-    "max_file_lines": 882,
+    "max_file_lines": 878,
     "scc_count": 0,
     "scc_max_size": 0,
     "scc_node_count": 0,
+    "sprawl_dirs_count": 0,
+    "stamped_code_files": 0,
     "sys_path_files": 0
   },
   "options": {
     "large_file_lines": 1000,
-    "large_func_lines": 150
+    "large_func_lines": 150,
+    "sprawl_dir_files": 80
   },
   "repo_name": "repository",
   "schema": "keeper.budget.v1"

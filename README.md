@@ -16,7 +16,7 @@
 ## コマンド
 
 ```bash
-# 1. 診断（依存の輪っか・隠れ読み込み・sys.path・コピー重複・巨大ファイル/関数）
+# 1. 診断（循環依存・隠れ読み込み・sys.path・重複・docs内コード・肥大ディレクトリ・接尾辞増殖・巨大ファイル/関数）
 python3 keeper.py diagnose /path/to/repo
 python3 keeper.py diagnose /path/to/repo --json
 
@@ -38,6 +38,10 @@ python3 keeper.py budget init /path/to/repo -o /path/to/repo/keeper_budget.json 
 ```yaml
 - run: python3 keeper.py budget check .
 ```
+
+## 標本資料
+
+- [samples/kai.md](samples/kai.md) — ヒト記述 **0 行**の純粋 LLM リポジトリ（`poidowl/kai`、追跡 `3,149` ファイル）の実測値と 6 病理。
 
 ## テスト（セルフ検問を含む）
 

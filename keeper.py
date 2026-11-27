@@ -33,20 +33,14 @@ JS_EXTS = {".js", ".mjs", ".cjs", ".ts", ".tsx"}
 HTML_EXTS = {".html", ".htm"}
 CODE_EXTS = PY_EXTS | JS_EXTS | HTML_EXTS
 
-SKIP_DIRS = {
-    ".git",
-    "node_modules",
-    "__pycache__",
-    ".venv",
-    "venv",
-    "dist",
-    "build",
-    ".next",
-    ".cache",
-}
-
+SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build", ".next", ".cache"}
+DOC_DIRS = {"doc", "docs"}
 IGNORED_DUP_NAMES = {"__init__.py", "index.html", "index.js", "index.mjs", "index.ts", "main.py"}
 
+_RE_STAMPED_STEM = re.compile(
+    r"(?:_(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])|_20\d{6}|_v\d+|_tameshi|_mihon|_old|_bak|_copy)$",
+    re.IGNORECASE,
+)
 _RE_JS_BLOCK_COMMENT = re.compile(r"/\*[\s\S]*?\*/")
 _RE_JS_LINE_COMMENT = re.compile(r"(^|[^\:])//[^\n]*")
 _RE_JS_STRING = re.compile(r"""'(?:\\.|[^'\\\n])*'|"(?:\\.|[^"\\\n])*"|`(?:\\.|[^`\\])*`""")
@@ -61,13 +55,9 @@ _RE_JS_FUNC_START = re.compile(
     r"""|(?:^|[;\n])\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>\s*\{""",
     re.MULTILINE,
 )
-_RE_HTML_SCRIPT_SRC = re.compile(
-    r"""<script\b[^>]*\bsrc\s*=\s*['"]([^'"]+)['"][^>]*>""",
-    re.IGNORECASE,
-)
+_RE_HTML_SCRIPT_SRC = re.compile(r"""<script\b[^>]*\bsrc\s*=\s*['"]([^'"]+)['"][^>]*>""", re.IGNORECASE)
 _RE_HTML_INLINE_SCRIPT = re.compile(
-    r"""<script\b(?![^>]*\bsrc\s*=)[^>]*>([\s\S]*?)</script>""",
-    re.IGNORECASE,
+    r"""<script\b(?![^>]*\bsrc\s*=)[^>]*>([\s\S]*?)</script>""", re.IGNORECASE
 )
 
 BUDGET_KEYS = (
@@ -78,6 +68,9 @@ BUDGET_KEYS = (
     "sys_path_files",
     "duplicate_exact_groups",
     "duplicate_name_groups",
+    "code_in_docs_files",
+    "sprawl_dirs_count",
+    "stamped_code_files",
     "large_files_count",
     "max_file_lines",
     "large_funcs_count",
@@ -98,12 +91,7 @@ def _is_test_path(rel_path: str) -> bool:
     base = parts[-1]
     if any(p in ("test", "tests", "__tests__", "spec", "specs") for p in parts[:-1]):
         return True
-    return (
-        base.startswith("test_")
-        or base.endswith("_test.py")
-        or ".test." in base
-        or ".spec." in base
-    )
+    return base.startswith("test_") or base.endswith("_test.py") or ".test." in base or ".spec." in base
 
 
 def _list_repo_files(repo: Path) -> List[str]:
@@ -111,10 +99,10 @@ def _list_repo_files(repo: Path) -> List[str]:
     if (repo / ".git").exists():
         try:
             out = subprocess.check_output(
-                ["git", "-C", str(repo), "ls-files", "--cached", "--others", "--exclude-standard"],
+                ["git", "-C", str(repo), "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
                 stderr=subprocess.DEVNULL,
             ).decode("utf-8", errors="replace")
-            files = sorted({line.strip() for line in out.splitlines() if line.strip()})
+            files = sorted({entry for entry in out.split("\0") if entry})
             return [f for f in files if (repo / f).is_file()]
         except Exception:
             pass
@@ -438,6 +426,27 @@ def _collect_duplicates(
     return (exact, by_basename)
 
 
+def _collect_structure_metrics(
+    all_files: Sequence[str], code_files: Sequence[str], sprawl_dir_files: int
+) -> Tuple[List[str], List[Dict[str, Any]], int, List[str]]:
+    dir_counts: Dict[str, int] = defaultdict(int)
+    for f in all_files:
+        dir_counts[posixpath.dirname(f) or "."] += 1
+    code_dirs = {posixpath.dirname(f) or "." for f in code_files}
+    max_code_dir = max((dir_counts[d] for d in code_dirs), default=0)
+    sprawl_dirs = sorted(
+        [{"dir": d, "files": dir_counts[d]} for d in code_dirs if dir_counts[d] >= sprawl_dir_files],
+        key=lambda x: (-x["files"], x["dir"]),
+    )
+    code_in_docs = sorted(
+        f for f in code_files if any(seg in DOC_DIRS for seg in f.lower().split("/")[:-1])
+    )
+    stamped = sorted(
+        f for f in code_files if _RE_STAMPED_STEM.search(posixpath.splitext(posixpath.basename(f))[0])
+    )
+    return (code_in_docs, sprawl_dirs, max_code_dir, stamped)
+
+
 def analyze_repo(
     repo: Path,
     *,
@@ -445,14 +454,16 @@ def analyze_repo(
     large_file_lines: int = 1000,
     large_func_lines: int = 150,
     min_dup_lines: int = 50,
+    sprawl_dir_files: int = 80,
 ) -> Dict[str, Any]:
     repo = repo.resolve()
+    all_files = _list_repo_files(repo)
     code_files: List[str] = []
     test_files: Set[str] = set()
     file_lines: Dict[str, int] = {}
     file_hashes: Dict[str, str] = {}
 
-    for rel in _list_repo_files(repo):
+    for rel in all_files:
         if posixpath.splitext(rel)[1].lower() not in CODE_EXTS:
             continue
         try:
@@ -513,6 +524,9 @@ def analyze_repo(
 
     sccs = _tarjan_scc(code_files, adj)
     exact_dups, name_dups = _collect_duplicates(code_files, file_lines, file_hashes, min_dup_lines)
+    code_in_docs, sprawl_dirs, max_code_dir, stamped = _collect_structure_metrics(
+        all_files, code_files, sprawl_dir_files
+    )
     large_files = sorted(
         [{"file": f, "lines": file_lines[f]} for f in code_files if file_lines[f] >= large_file_lines],
         key=lambda x: (-x["lines"], x["file"]),
@@ -523,6 +537,7 @@ def analyze_repo(
         ext_counts[posixpath.splitext(f)[1].lower()] += 1
 
     metrics = {
+        "tracked_files": len(all_files),
         "code_files": len(code_files),
         "total_code_lines": sum(file_lines[f] for f in code_files),
         "scc_count": len(sccs),
@@ -532,6 +547,10 @@ def analyze_repo(
         "sys_path_files": len(sys_path_files),
         "duplicate_exact_groups": len(exact_dups),
         "duplicate_name_groups": len(name_dups),
+        "code_in_docs_files": len(code_in_docs),
+        "sprawl_dirs_count": len(sprawl_dirs),
+        "max_code_dir_files": max_code_dir,
+        "stamped_code_files": len(stamped),
         "large_files_count": len(large_files),
         "max_file_lines": max((file_lines[f] for f in code_files), default=0),
         "large_funcs_count": len(large_funcs),
@@ -546,6 +565,9 @@ def analyze_repo(
         "sccs": sccs,
         "exact_dup_groups": exact_dups,
         "name_dup_groups": name_dups,
+        "code_in_docs": code_in_docs,
+        "sprawl_dirs": sprawl_dirs,
+        "stamped_files": stamped,
         "large_files": large_files,
         "large_funcs": large_funcs,
         "top_fan_in": sorted(
@@ -591,10 +613,8 @@ def _has_companion_test(rel_path: str, test_files: Set[str]) -> bool:
 
 def prescribe_repo(analysis: Dict[str, Any], *, top_n: int = 10) -> Dict[str, Any]:
     repo = Path(analysis["repo"])
-    adj: Dict[str, Set[str]] = analysis["_adj"]
-    rev_adj: Dict[str, Set[str]] = analysis["_rev_adj"]
-    edge_refs: Dict[Tuple[str, str], List[ImportRef]] = analysis["_edge_refs"]
-    test_files: Set[str] = analysis["_test_files"]
+    adj, rev_adj = analysis["_adj"], analysis["_rev_adj"]
+    edge_refs, test_files = analysis["_edge_refs"], analysis["_test_files"]
 
     cycle_cuts: List[Dict[str, Any]] = []
     for scc_idx, scc in enumerate(analysis["sccs"]):
@@ -611,27 +631,13 @@ def prescribe_repo(analysis: Dict[str, Any], *, top_n: int = 10) -> Dict[str, An
                 nodes_freed = len(scc) - new_nodes
                 refs = edge_refs.get((u, v), [])
                 has_hidden = any(r.hidden for r in refs)
-                score = (
-                    nodes_freed * 100
-                    + (len(scc) - new_max) * 40
-                    + (15 if has_hidden else 0)
-                    - min(len(refs), 10) * 2
-                )
-                candidates.append(
-                    {
-                        "scc_index": scc_idx + 1,
-                        "scc_size": len(scc),
-                        "src": u,
-                        "dst": v,
-                        "lines": sorted({r.line for r in refs if r.line > 0}),
-                        "ref_count": len(refs),
-                        "hidden": has_hidden,
-                        "nodes_freed": nodes_freed,
-                        "new_max_scc": new_max,
-                        "new_scc_count": len(new_sccs),
-                        "score": score,
-                    }
-                )
+                score = nodes_freed * 100 + (len(scc) - new_max) * 40 + (15 if has_hidden else 0) - min(len(refs), 10) * 2
+                candidates.append({
+                    "scc_index": scc_idx + 1, "scc_size": len(scc), "src": u, "dst": v,
+                    "lines": sorted({r.line for r in refs if r.line > 0}), "ref_count": len(refs),
+                    "hidden": has_hidden, "nodes_freed": nodes_freed, "new_max_scc": new_max,
+                    "new_scc_count": len(new_sccs), "score": score,
+                })
         candidates.sort(key=lambda x: (-x["score"], -x["nodes_freed"], x["ref_count"], x["src"], x["dst"]))
         cycle_cuts.append({"scc_index": scc_idx + 1, "scc_size": len(scc), "members": scc, "top_cuts": candidates[:5]})
 
@@ -647,37 +653,21 @@ def prescribe_repo(analysis: Dict[str, Any], *, top_n: int = 10) -> Dict[str, An
             has_test = _has_companion_test(path, test_files)
             commits, last_date = _git_file_stats(repo, path)
             score = callers * 50 + (20 if has_test else 0) + min(commits, 30) * 2 - path.count("/") * 3
-            scored.append(
-                {
-                    "path": path,
-                    "lines": entry["lines"],
-                    "callers": callers,
-                    "has_test": has_test,
-                    "git_commits": commits,
-                    "last_date": last_date,
-                    "score": score,
-                }
-            )
+            scored.append({
+                "path": path, "lines": entry["lines"], "callers": callers,
+                "has_test": has_test, "git_commits": commits, "last_date": last_date, "score": score,
+            })
         scored.sort(key=lambda x: (-x["score"], -x["callers"], -x["git_commits"], x["last_date"], x["path"]))
-        dup_prescriptions.append(
-            {
-                "name": grp["name"],
-                "identical": grp["identical"],
-                "total_lines": sum(f["lines"] for f in scored),
-                "canonical": scored[0],
-                "others": scored[1:],
-            }
-        )
+        dup_prescriptions.append({
+            "name": grp["name"], "identical": grp["identical"],
+            "total_lines": sum(f["lines"] for f in scored), "canonical": scored[0], "others": scored[1:],
+        })
     dup_prescriptions.sort(key=lambda x: (-x["total_lines"], x["name"]))
 
     return {
-        "repo": analysis["repo"],
-        "repo_name": analysis["repo_name"],
-        "is_shallow": analysis["is_shallow"],
-        "summary": analysis["metrics"],
-        "top_cycle_cuts": all_cuts[:top_n],
-        "cycle_clusters": cycle_cuts,
-        "duplicate_prescriptions": dup_prescriptions[:top_n],
+        "repo": analysis["repo"], "repo_name": analysis["repo_name"], "is_shallow": analysis["is_shallow"],
+        "summary": analysis["metrics"], "top_cycle_cuts": all_cuts[:top_n],
+        "cycle_clusters": cycle_cuts, "duplicate_prescriptions": dup_prescriptions[:top_n],
     }
 
 
@@ -690,19 +680,27 @@ def _print_diagnose(analysis: Dict[str, Any]) -> None:
     langs = ", ".join(f"{k}:{v}" for k, v in analysis["languages"].items()) or "(none)"
     print(f"=== DIAGNOSE: {analysis['repo_name']} ({analysis['repo']}) ===")
     print(f"Languages : {langs}")
-    print(f"Code files: {m['code_files']} ({m['total_code_lines']} lines)")
+    print(f"Code files: {m['code_files']} ({m['total_code_lines']} lines, tracked={m['tracked_files']})")
     print()
     print("Metrics:")
     for k in BUDGET_KEYS:
-        extra = f" (max={m['max_file_lines']} lines)" if k == "large_files_count" else ""
         if k == "max_file_lines":
             continue
+        extra = ""
+        if k == "large_files_count":
+            extra = f" (max={m['max_file_lines']} lines)"
+        elif k == "sprawl_dirs_count":
+            extra = f" (max_dir={m['max_code_dir_files']} files)"
         print(f"  {k:24s}: {m[k]}{extra}")
     if analysis["sccs"]:
         print("\nCycle clusters (SCC):")
         for i, scc in enumerate(analysis["sccs"], 1):
             preview = ", ".join(scc[:6]) + (f" ... (+{len(scc)-6})" if len(scc) > 6 else "")
             print(f"  #{i} (size {len(scc)}): {preview}")
+    if analysis["sprawl_dirs"]:
+        print("\nSprawl directories:")
+        for sd in analysis["sprawl_dirs"][:10]:
+            print(f"  {sd['files']:6d}  {sd['dir']}")
     if analysis["large_files"]:
         print("\nLargest files (top 10):")
         for lf in analysis["large_files"][:10]:
@@ -750,9 +748,11 @@ def _print_prescribe(presc: Dict[str, Any]) -> None:
 
 
 def cmd_budget_init(
-    repo: Path, out_path: Path, ratchet: bool, large_file: int, large_func: int
+    repo: Path, out_path: Path, ratchet: bool, large_file: int, large_func: int, sprawl_dir: int = 80
 ) -> int:
-    analysis = analyze_repo(repo, large_file_lines=large_file, large_func_lines=large_func)
+    analysis = analyze_repo(
+        repo, large_file_lines=large_file, large_func_lines=large_func, sprawl_dir_files=sprawl_dir
+    )
     current = {k: analysis["metrics"][k] for k in BUDGET_KEYS}
     if ratchet and out_path.exists():
         old_ceilings = json.loads(out_path.read_text(encoding="utf-8")).get("ceilings", {})
@@ -766,7 +766,7 @@ def cmd_budget_init(
     payload = {
         "schema": "keeper.budget.v1",
         "repo_name": analysis["repo_name"],
-        "options": {"large_file_lines": large_file, "large_func_lines": large_func},
+        "options": {"large_file_lines": large_file, "large_func_lines": large_func, "sprawl_dir_files": sprawl_dir},
         "ceilings": ceilings,
     }
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -787,6 +787,7 @@ def cmd_budget_check(repo: Path, budget_path: Path) -> int:
         repo,
         large_file_lines=int(opts.get("large_file_lines", 1000)),
         large_func_lines=int(opts.get("large_func_lines", 150)),
+        sprawl_dir_files=int(opts.get("sprawl_dir_files", 80)),
     )
     ceilings: Dict[str, int] = budget.get("ceilings", {})
     metrics = analysis["metrics"]
@@ -817,19 +818,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Repository diagnostics, prescription, and budget guard.")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    p_diag = sub.add_parser("diagnose", help="Measure tangle and bloat metrics")
+    p_diag = sub.add_parser("diagnose", help="Measure tangle, structure, and bloat metrics")
     p_diag.add_argument("repo", type=Path)
     p_diag.add_argument("--json", action="store_true")
     p_diag.add_argument("--include-tests", action="store_true")
-    p_diag.add_argument("--large-file", type=int, default=1000)
-    p_diag.add_argument("--large-func", type=int, default=150)
 
     p_presc = sub.add_parser("prescribe", help="Rank cycle cuts and duplicate canonicals")
     p_presc.add_argument("repo", type=Path)
     p_presc.add_argument("--json", action="store_true")
     p_presc.add_argument("--top", type=int, default=10)
-    p_presc.add_argument("--large-file", type=int, default=1000)
-    p_presc.add_argument("--large-func", type=int, default=150)
 
     p_bud = sub.add_parser("budget", help="Initialize or enforce metric ceilings")
     bud_sub = p_bud.add_subparsers(dest="budget_cmd", required=True)
@@ -838,8 +835,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p_binit.add_argument("repo", type=Path)
     p_binit.add_argument("-o", "--output", type=Path, default=None)
     p_binit.add_argument("--ratchet", action="store_true")
-    p_binit.add_argument("--large-file", type=int, default=1000)
-    p_binit.add_argument("--large-func", type=int, default=150)
+
+    for p in (p_diag, p_presc, p_binit):
+        p.add_argument("--large-file", type=int, default=1000)
+        p.add_argument("--large-func", type=int, default=150)
+        p.add_argument("--sprawl-dir", type=int, default=80)
 
     p_bchk = bud_sub.add_parser("check", help="Fail if current metrics exceed budget")
     p_bchk.add_argument("repo", type=Path)
@@ -848,30 +848,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parser.parse_args(argv)
     if args.cmd == "diagnose":
         res = analyze_repo(
-            args.repo,
-            include_tests=args.include_tests,
-            large_file_lines=args.large_file,
-            large_func_lines=args.large_func,
+            args.repo, include_tests=args.include_tests,
+            large_file_lines=args.large_file, large_func_lines=args.large_func, sprawl_dir_files=args.sprawl_dir,
         )
-        if args.json:
-            print(json.dumps(_strip_internal(res), indent=2, ensure_ascii=False, sort_keys=True))
-        else:
-            _print_diagnose(res)
+        print(json.dumps(_strip_internal(res), indent=2, ensure_ascii=False, sort_keys=True)) if args.json else _print_diagnose(res)
         return 0
 
     if args.cmd == "prescribe":
-        res = analyze_repo(args.repo, large_file_lines=args.large_file, large_func_lines=args.large_func)
+        res = analyze_repo(
+            args.repo, large_file_lines=args.large_file, large_func_lines=args.large_func, sprawl_dir_files=args.sprawl_dir
+        )
         presc = prescribe_repo(res, top_n=args.top)
-        if args.json:
-            print(json.dumps(presc, indent=2, ensure_ascii=False, sort_keys=True))
-        else:
-            _print_prescribe(presc)
+        print(json.dumps(presc, indent=2, ensure_ascii=False, sort_keys=True)) if args.json else _print_prescribe(presc)
         return 0
 
     if args.cmd == "budget":
         default_file = args.repo.resolve() / "keeper_budget.json"
         if args.budget_cmd == "init":
-            return cmd_budget_init(args.repo, args.output or default_file, args.ratchet, args.large_file, args.large_func)
+            return cmd_budget_init(
+                args.repo, args.output or default_file, args.ratchet, args.large_file, args.large_func, args.sprawl_dir
+            )
         if args.budget_cmd == "check":
             return cmd_budget_check(args.repo, args.budget or default_file)
 
